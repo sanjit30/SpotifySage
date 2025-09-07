@@ -1,0 +1,204 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    container_name: music_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    volumes:
+      - zk_data:/var/lib/zookeeper/data
+
+  message_broker:
+    image: confluentinc/cp-kafka:7.3.0
+    container_name: music_message_broker
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,INTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,INTERNAL://message_broker:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    volumes:
+      - broker_data:/var/lib/kafka/data
+
+  schema_service:
+    image: confluentinc/cp-schema-registry:7.3.0
+    container_name: music_schema_service
+    depends_on:
+      - message_broker
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema_service
+      SCHEMA_REGISTRY_KAFKASTORE_CONNECTION_URL: zookeeper:2181
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://message_broker:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+
+  data_warehouse:
+    image: postgres:14-alpine
+    container_name: music_data_warehouse
+    environment:
+      POSTGRES_USER: streaming_user
+      POSTGRES_PASSWORD: streaming_pass_2025
+      POSTGRES_DB: music_streaming_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - warehouse_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U streaming_user -d music_streaming_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama_service
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+  web_api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: music_web_api
+    environment:
+      - SPOTIFY_APP_ID=${SPOTIFY_APP_ID}
+      - SPOTIFY_APP_SECRET=${SPOTIFY_APP_SECRET}
+      - DATABASE_HOST=data_warehouse
+      - DATABASE_NAME=music_streaming_db
+      - DATABASE_USER=streaming_user
+      - DATABASE_PASSWORD=streaming_pass_2025
+      - OLLAMA_ENDPOINT=${OLLAMA_ENDPOINT}
+      - MAIL_APP_KEY=${MAIL_APP_KEY}
+    ports:
+      - "5000:5000"
+    depends_on:
+      data_warehouse:
+        condition: service_healthy
+      message_broker:
+        condition: service_started
+    volumes:
+      - ./logs:/app/logs
+
+  data_publisher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: music_data_publisher
+    command: python streaming_pipeline/data_publisher.py
+    environment:
+      - SPOTIFY_APP_ID=${SPOTIFY_APP_ID}
+      - SPOTIFY_APP_SECRET=${SPOTIFY_APP_SECRET}
+      - DATABASE_HOST=data_warehouse
+      - DATABASE_NAME=music_streaming_db
+      - DATABASE_USER=streaming_user
+      - DATABASE_PASSWORD=streaming_pass_2025
+    depends_on:
+      web_api:
+        condition: service_started
+      message_broker:
+        condition: service_started
+      data_warehouse:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  track_subscriber:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: music_track_subscriber
+    command: python streaming_pipeline/track_subscriber.py
+    environment:
+      - DATABASE_HOST=data_warehouse
+      - DATABASE_NAME=music_streaming_db
+      - DATABASE_USER=streaming_user
+      - DATABASE_PASSWORD=streaming_pass_2025
+    depends_on:
+      message_broker:
+        condition: service_started
+      data_warehouse:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  performer_subscriber:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: music_performer_subscriber
+    command: python streaming_pipeline/performer_subscriber.py
+    environment:
+      - DATABASE_HOST=data_warehouse
+      - DATABASE_NAME=music_streaming_db
+      - DATABASE_USER=streaming_user
+      - DATABASE_PASSWORD=streaming_pass_2025
+    depends_on:
+      message_broker:
+        condition: service_started
+      data_warehouse:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  release_subscriber:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: music_release_subscriber
+    command: python streaming_pipeline/release_subscriber.py
+    environment:
+      - DATABASE_HOST=data_warehouse
+      - DATABASE_NAME=music_streaming_db
+      - DATABASE_USER=streaming_user
+      - DATABASE_PASSWORD=streaming_pass_2025
+    depends_on:
+      message_broker:
+        condition: service_started
+      data_warehouse:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  listening_subscriber:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: music_listening_subscriber
+    command: python streaming_pipeline/listening_subscriber.py
+    environment:
+      - DATABASE_HOST=data_warehouse
+      - DATABASE_NAME=music_streaming_db
+      - DATABASE_USER=streaming_user
+      - DATABASE_PASSWORD=streaming_pass_2025
+    depends_on:
+      message_broker:
+        condition: service_started
+      data_warehouse:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+volumes:
+  broker_data:
+  warehouse_data:
+  zk_data:
+  ollama_data:
